@@ -1,0 +1,11 @@
+[package]
+name = "quickstart-docs-snippets"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+renegade-sdk = { git = "https://github.com/renegade-fi/rust-sdk.git", default-features = false, features = ["external-match-client", "darkpool-client"] }
+renegade-external-api = { package = "external-api", git = "https://github.com/renegade-fi/renegade.git", default-features = false, features = ["auth", "external-match-api"] }
+alloy = "1.0.1"
+tokio = { version = "1.30.0", features = ["full"] }
+eyre = "0.6"

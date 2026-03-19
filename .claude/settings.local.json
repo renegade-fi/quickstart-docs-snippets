@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(CARGO_TARGET_DIR=/tmp/quickstart-target cargo +nightly-2025-11-25 doc --document-private-items -p renegade-sdk)",
+      "Bash(CARGO_TARGET_DIR=/tmp/quickstart-target cargo check --tests 2>&1)"
+    ]
+  }
+}
