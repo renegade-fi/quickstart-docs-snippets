@@ -3,7 +3,9 @@
 This repository contains runnable code snippets to help integrators get started
 with Renegade.
 
-## Direct matches
+## Rust
+
+### Direct matches
 
 First, set a funded Base Sepolia account's private key as an environment variable:
 
@@ -17,7 +19,7 @@ Next, run:
 cargo test direct_match_example -- --nocapture
 ```
 
-## Solver RFQs
+### Solver RFQs
 
 You'll first need to contact the Renegade team to get these secret values:
 
@@ -31,3 +33,10 @@ Next, run:
 ```rust
 cargo test rfq_example -- --nocapture
 ```
+
+<!--## Typescript-->
+
+<!--### Direct matches-->
+
+<!--### Solver RFQ-->
+
