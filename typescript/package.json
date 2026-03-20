@@ -1,0 +1,30 @@
+{
+  "name": "renegade-quickstart",
+  "version": "1.0.0",
+  "description": "",
+  "homepage": "https://github.com/renegade-fi/quickstart-docs-snippets#readme",
+  "bugs": {
+    "url": "https://github.com/renegade-fi/quickstart-docs-snippets/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/renegade-fi/quickstart-docs-snippets.git"
+  },
+  "license": "MIT",
+  "author": "Renegade Finance",
+  "type": "module",
+  "scripts": {
+    "solver-rfq": "tsx solver-rfq.ts"
+  },
+  "dependencies": {
+    "@noble/secp256k1": "^2.2.3",
+    "@renegade-fi/node": "^1.0.0",
+    "@renegade-fi/renegade-sdk": "^2.0.1",
+    "viem": "^2.23.15"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
