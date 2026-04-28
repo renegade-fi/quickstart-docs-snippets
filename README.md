@@ -40,8 +40,24 @@ cast send \
     --private-key $PRIVATE_KEY
 ```
 
-Next, run:
+In `rust/`, run:
 
 ```rust
 cargo test rfq_example -- --nocapture
+```
+
+## Typescript
+
+### Solver RFQs
+
+```
+export PRIVATE_KEY=0x...
+export EXTERNAL_MATCH_KEY=...
+export EXTERNAL_MATCH_SECRET=...
+```
+
+In `typescript/`, run:
+
+```bash
+npm run solver-rfq
 ```
