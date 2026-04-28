@@ -28,15 +28,20 @@ export EXTERNAL_MATCH_KEY=...
 export EXTERNAL_MATCH_SECRET=...
 ```
 
+Mint dummy USDC for testing with:
+
+```bash
+cast send \
+    0xD9961Bb4Cb27192f8dAd20a662be081f546b0E74 \
+    "mint(address,uint256)"
+    <YOUR ADDRESS> \
+    1000000000000000000000000000 \
+    --rpc-url https://sepolia.base.org \
+    --private-key $PRIVATE_KEY
+```
+
 Next, run:
 
 ```rust
 cargo test rfq_example -- --nocapture
 ```
-
-<!--## Typescript-->
-
-<!--### Direct matches-->
-
-<!--### Solver RFQ-->
-
