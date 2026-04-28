@@ -7,7 +7,9 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use renegade_external_api::types::OrderType;
 use renegade_sdk::client::RenegadeClient;
-use renegade_sdk::{ExternalMatchClient, ExternalOrderBuilderV2};
+use renegade_sdk::{
+    AssembleQuoteOptionsV2, ExternalMatchClient, ExternalOrderBuilderV2,
+};
 
 /// Dummy WETH token address on Base Sepolia
 pub const WETH: &str = "0x31a5552AF53C35097Fdb20FFf294c56dc66FA04c";
@@ -29,7 +31,7 @@ sol! {
     }
 }
 
-/// Ensure ERC20 and Permit2 allowances are sufficient before depositing.
+/// Ensure ERC20 and Permit2 allowances are sufficient before placing an order.
 ///
 /// This handles the two-step approval flow required by the darkpool:
 /// 1. ERC20 approval: allows the Permit2 contract to spend the token
@@ -70,8 +72,9 @@ async fn ensure_allowances(
     Ok(())
 }
 
-/// Deposits USDC, places a buy-WETH order, waits for a match,
-/// then cancels the order and withdraws WETH.
+/// Approves Permit2, places a buy-WETH order, waits for a match,
+/// then cancels unfilled orders. Tokens transfer directly from the
+/// user's EOA via Permit2 on fill — no deposit or withdrawal needed.
 #[tokio::test]
 async fn direct_match_example() -> eyre::Result<()> {
     // 1. Create a client
@@ -84,20 +87,18 @@ async fn direct_match_example() -> eyre::Result<()> {
         client.create_account().await?;
     }
 
-    // 3. Approve & deposit USDC
+    // 3. Approve Permit2 to spend USDC
     let usdc_mint: Address = USDC.parse()?;
-    let deposit_amount: u128 = 100_000; // 0.1 USDC (6 decimals)
-    // Perform any necessary ERC20 approvals 
-    ensure_allowances(&client, usdc_mint, deposit_amount, &signer).await?;
-    client.deposit(usdc_mint, deposit_amount).await?;
-    println!("Deposited");
+    let input_amount: u128 = 100_000; // 0.1 USDC (6 decimals)
+    ensure_allowances(&client, usdc_mint, input_amount, &signer).await?;
 
     // 4. Place a buy order for WETH
+    //    When matched, USDC transfers directly from your EOA via Permit2
     let order = client
         .new_order_builder()
         .with_input_mint(USDC)?
         .with_output_mint(WETH)?
-        .with_input_amount(deposit_amount)
+        .with_input_amount(input_amount)
         .with_order_type(OrderType::PublicOrder)
         .build()?;
 
@@ -114,11 +115,6 @@ async fn direct_match_example() -> eyre::Result<()> {
         client.cancel_order(order.id).await?;
     }
     println!("Cancelled orders");
-
-    // 7. Withdraw USDC (no match occurred, so withdraw what we deposited)
-    let usdc_balance = client.get_balance_by_mint(usdc_mint).await?;
-    client.withdraw(usdc_mint, usdc_balance.amount).await?;
-    println!("Withdrew");
 
     Ok(())
 }
@@ -169,6 +165,80 @@ async fn rfq_example() -> eyre::Result<()> {
 
     // 5. Assemble the quote into a settlement transaction
     let Some(resp) = ext_client.assemble_quote_v2(quote).await? else {
+        println!("No bundle returned");
+        return Ok(());
+    };
+
+    // 6. Submit the settlement transaction on-chain
+    let tx = resp.settlement_tx().with_gas_limit(1_000_000);
+    let pending = provider.send_transaction(tx).await?;
+    let receipt = pending.get_receipt().await?;
+    if receipt.status() {
+        println!("Settlement tx confirmed: {:#x}", receipt.transaction_hash);
+    } else {
+        println!("Settlement tx reverted: {:#x} (bundle may have expired)", receipt.transaction_hash);
+    }
+
+    Ok(())
+}
+
+/// Requests a quote at one input amount, then assembles it at a smaller
+/// amount via `with_updated_order`. The original quote's price is
+/// preserved; only the size is adjusted. The bundle's signature still
+/// validates because the executor signs a bounded match (a [min, max]
+/// range), not a point amount.
+#[tokio::test]
+async fn rfq_updated_order_example() -> eyre::Result<()> {
+    // 1. Create an external match client
+    let api_key = std::env::var("EXTERNAL_MATCH_KEY")?;
+    let api_secret = std::env::var("EXTERNAL_MATCH_SECRET")?;
+    let ext_client = ExternalMatchClient::new_base_sepolia_client(&api_key, &api_secret)?;
+
+    // 2. Approve the darkpool to spend USDC
+    let private_key = std::env::var("PRIVATE_KEY")?;
+    let signer = PrivateKeySigner::from_str(&private_key)?;
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer))
+        .connect_http(RPC_URL.parse()?);
+
+    let darkpool: Address = ext_client.get_exchange_metadata().await?.settlement_contract_address.parse()?;
+    let input_mint: Address = USDC.parse()?;
+    let erc20 = IERC20::new(input_mint, &provider);
+    let allowance = erc20.allowance(provider.default_signer_address(), darkpool).call().await?;
+    if allowance < U256::from(10_000_000u128) {
+        erc20.approve(darkpool, U256::MAX).send().await?.watch().await?;
+        println!("Approved darkpool to spend USDC");
+    }
+
+    // 3. Request a quote at the originally desired amount
+    let original_amount: u128 = 10_000_000; // 10 USDC
+    let order = ExternalOrderBuilderV2::new()
+        .input_mint(USDC)
+        .output_mint(WETH)
+        .input_amount(original_amount)
+        .build()?;
+
+    let Some(quote) = ext_client.request_quote_v2(order).await? else {
+        println!("No quote available");
+        return Ok(());
+    };
+
+    // 4. Build an updated order with a smaller input amount.
+    //    In production, you would typically re-check the user's on-chain
+    //    balance here and only rescale if it has dropped below
+    //    `original_amount`. This snippet unconditionally scales down to
+    //    keep the example focused on `with_updated_order` itself.
+    let reduced_amount: u128 = 5_000_000; // 5 USDC
+    let updated_order = ExternalOrderBuilderV2::new()
+        .input_mint(USDC)
+        .output_mint(WETH)
+        .input_amount(reduced_amount)
+        .build()?;
+
+    // 5. Assemble the quote with the smaller amount. The quoted price is
+    //    preserved; only the size changes.
+    let opts = AssembleQuoteOptionsV2::default().with_updated_order(updated_order);
+    let Some(resp) = ext_client.assemble_quote_with_options_v2(quote, opts).await? else {
         println!("No bundle returned");
         return Ok(());
     };
