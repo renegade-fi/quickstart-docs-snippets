@@ -14,12 +14,13 @@
   "author": "Renegade Finance",
   "type": "module",
   "scripts": {
+    "direct-match": "tsx direct-match.ts",
     "solver-rfq": "tsx solver-rfq.ts"
   },
   "dependencies": {
     "@noble/secp256k1": "^2.2.3",
-    "@renegade-fi/node": "^1.0.0",
-    "@renegade-fi/renegade-sdk": "^2.0.1",
+    "@renegade-fi/node": "file:../../typescript-sdk/packages/node",
+    "@renegade-fi/renegade-sdk": "file:../../typescript-sdk/packages/renegade-sdk",
     "viem": "^2.23.15"
   },
   "devDependencies": {
