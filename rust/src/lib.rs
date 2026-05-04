@@ -255,3 +255,40 @@ async fn rfq_updated_order_example() -> eyre::Result<()> {
 
     Ok(())
 }
+
+/// Reads the order-book depth feed: lists the total number of pairs returned
+/// by `/v2/markets/depth`, then prints the per-side depth for WETH from
+/// `/v2/markets/{mint}/depth`. Useful for routing-time scoring without
+/// hitting `/quote` on every candidate path.
+#[tokio::test]
+async fn rfq_depth_example() -> eyre::Result<()> {
+    // 1. Create an external match client
+    let api_key = std::env::var("EXTERNAL_MATCH_KEY")?;
+    let api_secret = std::env::var("EXTERNAL_MATCH_SECRET")?;
+    let ext_client = ExternalMatchClient::new_base_sepolia_client(&api_key, &api_secret)?;
+
+    // 2. Fetch depth for all pairs and print the count
+    let all_depths = ext_client.get_market_depths_all_pairs().await?;
+    println!("Pairs returned by /v2/markets/depth: {}", all_depths.market_depths.len());
+
+    // 3. Fetch depth for WETH specifically and print both sides
+    let weth_depth = ext_client.get_market_depth(WETH).await?.market_depth;
+    let price = &weth_depth.market.price;
+    println!(
+        "WETH market: base={} quote={} price={} (ts={})",
+        weth_depth.market.base.address,
+        weth_depth.market.quote.address,
+        price.price,
+        price.timestamp,
+    );
+    println!(
+        "  buy:  total_quantity={} ({} USD)",
+        weth_depth.buy.total_quantity, weth_depth.buy.total_quantity_usd,
+    );
+    println!(
+        "  sell: total_quantity={} ({} USD)",
+        weth_depth.sell.total_quantity, weth_depth.sell.total_quantity_usd,
+    );
+
+    Ok(())
+}
