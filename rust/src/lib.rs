@@ -6,6 +6,7 @@ use alloy::providers::{Provider, ProviderBuilder, WalletProvider};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use renegade_external_api::types::OrderType;
+use renegade_sdk::api_types::ExternalMatchResponseV2;
 use renegade_sdk::client::RenegadeClient;
 use renegade_sdk::{
     AssembleQuoteOptionsV2, ExternalMatchClient, ExternalOrderBuilderV2,
@@ -171,6 +172,134 @@ async fn rfq_example() -> eyre::Result<()> {
 
     // 6. Submit the settlement transaction on-chain
     let tx = resp.settlement_tx().with_gas_limit(1_000_000);
+    let pending = provider.send_transaction(tx).await?;
+    let receipt = pending.get_receipt().await?;
+    if receipt.status() {
+        println!("Settlement tx confirmed: {:#x}", receipt.transaction_hash);
+    } else {
+        println!("Settlement tx reverted: {:#x} (bundle may have expired)", receipt.transaction_hash);
+    }
+
+    Ok(())
+}
+
+/// Requests a quote, assembles it into a malleable bundle, samples the
+/// receive amount at several points across the signed range, then commits
+/// to one and submits on-chain.
+///
+/// ## What is a malleable match?
+///
+/// A normal external match pins down one exact input amount before
+/// signing. A malleable match instead signs a *range* of input amounts at
+/// a fixed price. The caller picks the final amount on the client right
+/// before broadcasting the tx — anything inside the range is valid, and
+/// the price doesn't change.
+///
+/// In v2 every assemble response is a malleable bundle. You commit to a
+/// final input with `set_input_amount`, which rewrites the first
+/// `uint256` argument in the settlement calldata. The signature still
+/// validates because what was signed is the range, not a point.
+///
+/// ## Why isn't the lower bound just my `min_fill_size`?
+///
+/// The bounds come from the matched counterparty, not from the values
+/// you passed in. Your `input_amount` and `min_fill_size` only filter
+/// *which* internal orders are eligible to match your request. Once a
+/// counterparty is picked, the matching engine builds the malleable
+/// window like this:
+///
+/// 1. Let `match_amt` = the natural matched size against that
+///    counterparty (in your input units, e.g. USDC).
+/// 2. Open a ±10% window around it: `[match_amt * 0.9, match_amt * 1.1]`.
+/// 3. Clamp that window to the *counterparty's* own min_fill_size and
+///    remaining capacity.
+///
+/// So if the engine matches you against an internal order whose natural
+/// size is ~150 USDC, the bundle's bounds will be roughly
+/// `[135, 165]` — even if you asked for `min_fill_size = 100`. The 10%
+/// figure is the relayer-side `MAX_MALLEABLE_RANGE` constant; the
+/// clamps only narrow the window further, never widen it.
+///
+/// Practical implication: don't size `min_fill_size` expecting it to
+/// become the lower bound. Treat the returned `input_bounds()` as
+/// authoritative and pick your chosen input from inside it.
+#[tokio::test]
+async fn rfq_malleable_example() -> eyre::Result<()> {
+    // 1. Create an external match client
+    let api_key = std::env::var("EXTERNAL_MATCH_KEY")?;
+    let api_secret = std::env::var("EXTERNAL_MATCH_SECRET")?;
+    let ext_client = ExternalMatchClient::new_base_sepolia_client(&api_key, &api_secret)?;
+
+    // 2. Approve the darkpool to spend USDC. The chosen final input amount
+    //    must be covered by this allowance.
+    let private_key = std::env::var("PRIVATE_KEY")?;
+    let signer = PrivateKeySigner::from_str(&private_key)?;
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer))
+        .connect_http(RPC_URL.parse()?);
+
+    let darkpool: Address = ext_client.get_exchange_metadata().await?.settlement_contract_address.parse()?;
+    let input_mint: Address = USDC.parse()?;
+    let erc20 = IERC20::new(input_mint, &provider);
+    let allowance = erc20.allowance(provider.default_signer_address(), darkpool).call().await?;
+    if allowance < U256::from(150_000_000u128) {
+        erc20.approve(darkpool, U256::MAX).send().await?.watch().await?;
+        println!("Approved darkpool to spend USDC");
+    }
+
+    // 3. Build an external order. `min_fill_size` widens the lower bound
+    //    of the malleable range; without it the bundle is effectively
+    //    fixed at `input_amount`.
+    let order = ExternalOrderBuilderV2::new()
+        .input_mint(USDC)
+        .output_mint(WETH)
+        .input_amount(150_000_000)  // 150 USDC (upper bound)
+        .min_fill_size(100_000_000) // 100 USDC (lower bound)
+        .build()?;
+
+    // 4. Request a quote
+    let Some(quote) = ext_client.request_quote_v2(order).await? else {
+        println!("No quote available");
+        return Ok(());
+    };
+
+    // 5. Assemble the quote. In v2 every assemble response is a malleable
+    //    bundle; the input amount is not yet committed.
+    let Some(mut bundle): Option<ExternalMatchResponseV2> =
+        ext_client.assemble_quote_v2(quote).await?
+    else {
+        println!("No bundle returned");
+        return Ok(());
+    };
+
+    // 6. Inspect the bounds the executor signed over
+    let (min_input, max_input) = bundle.input_bounds();
+    println!("Input bounds: {min_input} - {max_input}");
+
+    // Sample the receive amount at five points across the signed range
+    // without committing. The price is fixed, so receive scales linearly
+    // with input — any of these samples would settle at the same rate.
+    let span = max_input - min_input;
+    for pct in [0u128, 25, 50, 75, 100] {
+        let input = min_input + span * pct / 100;
+        let receive = bundle.receive_amount_at_base(input);
+        println!("  input={input:>12} ({pct:>3}%) -> receive={receive}");
+    }
+
+    // 7. Commit to a final input amount. The choice is the caller's:
+    //    here we pick 1/4 of the way into the range to make the point
+    //    that the chosen amount is independent of the bounds. The SDK
+    //    rewrites the calldata in place; the signature stays valid.
+    let chosen_input = min_input + span / 4;
+    bundle.set_input_amount(chosen_input)?;
+    println!(
+        "Committed: send={} receive={}",
+        bundle.send_amount(),
+        bundle.receive_amount(),
+    );
+
+    // 8. Submit the settlement transaction on-chain
+    let tx = bundle.settlement_tx().with_gas_limit(1_000_000);
     let pending = provider.send_transaction(tx).await?;
     let receipt = pending.get_receipt().await?;
     if receipt.status() {
